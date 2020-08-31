@@ -1,0 +1,172 @@
+---
+title: "Single Cell Saptial Dataset Visualization"
+output: html_document
+---
+
+```{r  global-options, include=FALSE}
+knitr::opts_chunk$set(fig.width=16, fig.height=6, echo=FALSE, warning=FALSE, message=FALSE,comment=FALSE)
+```
+
+# Overview
+The dataset was generated with the Visium technology of 10x Genomics(https://www.10xgenomics.com/)
+
+Code was updated from seurat package: https://satijalab.org/seurat/
+
+# loading library
+```{r, warning=FALSE, comment=FALSE,message=FALSE}
+library(Seurat)
+library(SeuratData)
+library(ggplot2)
+library(patchwork)
+library(dplyr)
+```
+
+# Data overview
+The data used here is recently released "stxBrain" dataset of sagital mouse brain slices generated using the Visium v1 chemistry including two serial anterior sections, and two (matched) serial posterior sections.
+
+```{r, warning=FALSE, comment=FALSE}
+#InstallData("stxBrain")
+?stxBrain
+# select posterior 1 data
+brain_poste<- LoadData("stxBrain", type = "posterior1")
+plot1 <- VlnPlot(brain_poste, features = "nCount_Spatial", pt.size = 0.1) + NoLegend()
+plot2 <- SpatialFeaturePlot(brain_poste, features = "nCount_Spatial") + theme(legend.position = "right")
+#wrap_plots(plot1, plot2)
+```
+
+The variance in molecular counts across spots is not only technical in nature, but also is dependent on the tissue anatomy.
+```{r}
+wrap_plots(plot1, plot2)
+```
+
+First normalize the data  to account for variance in sequencing depth across data points.
+
+```{r, warning=FALSE, comment=FALSE,message=FALSE}
+# compare log and SCT normalization
+brain_poste <- SCTransform(brain_poste, assay = "Spatial", return.only.var.genes = FALSE, verbose = FALSE)
+
+brain_poste <- NormalizeData(brain_poste, verbose = FALSE, assay = "Spatial")
+
+brain_poste <- GroupCorrelation(brain_poste, group.assay = "Spatial", assay = "Spatial", slot = "data", do.plot = FALSE)
+brain_poste <- GroupCorrelation(brain_poste, group.assay = "Spatial", assay = "SCT", slot = "scale.data", do.plot = FALSE)
+
+p1 <- GroupCorrelationPlot(brain_poste, assay = "Spatial", cor = "nCount_Spatial_cor") + ggtitle("Log Normalization") + 
+  theme(plot.title = element_text(hjust = 0.5))
+p2 <- GroupCorrelationPlot(brain_poste, assay = "SCT", cor = "nCount_Spatial_cor") + ggtitle("SCTransform Normalization") + 
+  theme(plot.title = element_text(hjust = 0.5))
+p1 + p2
+```
+
+Place genes into groups based on mean. By boxplo, log-normalization fails to adequately normalize genes in the first three groups,  sctransform normalization mitigates this effect.
+
+### Use SCTtransformation
+```{r, warning=FALSE, comment=FALSE,message=FALSE}
+brain_poste <- LoadData("stxBrain", type = "posterior1")
+brain_poste <- SCTransform(brain_poste, assay = "Spatial", verbose = FALSE)
+```
+
+
+# Gene expression visualization
+
+```{r}
+# Show two features "Cck", "Dcn"
+SpatialFeaturePlot(brain_poste, features = c("Cck", "Dcn"))
+
+# Adjust the size of the spots (and their transparency) to improve the visualization of the histology image
+p1 <- SpatialFeaturePlot(brain_poste, features = "Dcn", pt.size.factor = 1)
+p2 <- SpatialFeaturePlot(brain_poste, features = "Dcn", alpha = c(0.1, 1))
+p1 + p2
+```
+
+# Dimensionality reduction, clustering, and visualization
+Run dimensionality reduction and clustering on the RNA expression data
+
+```{r, warning=FALSE, comment=FALSE,message=FALSE}
+brain_poste <- RunPCA(brain_poste, assay = "SCT", verbose = FALSE)
+brain_poste <- FindNeighbors(brain_poste, reduction = "pca", dims = 1:30)
+brain_poste <- FindClusters(brain_poste, verbose = FALSE)
+brain_poste <- RunUMAP(brain_poste, reduction = "pca", dims = 1:30)
+p1 <- DimPlot(brain_poste, reduction = "umap", label = TRUE)
+p2 <- SpatialDimPlot(brain_poste, label = TRUE, label.size = 3)
+p1 + p2
+```
+
+Use the cells.highlight parameter to demarcate particular cells of interest on a SpatialDimPlot. 
+```{r}
+SpatialDimPlot(brain_poste, cells.highlight = CellsByIdentities(object = brain_poste, idents = c(1, 2, 3, 4, 
+    5, 6,7,8,9)), facet.highlight = TRUE, ncol = 3)
+```
+
+# Interactive plotting                                                                                                 
+```{r, warning=FALSE, comment=FALSE,message=FALSE}
+SpatialDimPlot(brain_poste)
+SpatialFeaturePlot(brain_poste, features = "Dcn")
+LinkedDimPlot(brain_poste)
+```
+
+# Identification of Spatially Variable Features
+Perform differential expression based on pre-annotated anatomical regions within the tissue, which may be determined either from unsupervised clustering or prior knowledge. 
+```{r, warning=FALSE, comment=FALSE,message=FALSE}
+
+de_markers <- FindMarkers(brain_poste, ident.1 = 4, ident.2 = 6)
+SpatialFeaturePlot(object = brain_poste, features = rownames(de_markers)[3:5], alpha = c(0.1, 1), ncol = 3)
+```
+
+Implemented in FindSpatiallyVariables, is to search for features exhibiting spatial patterning in the absence of pre-annotation. 
+
+```{r}
+brain_poste <- FindSpatiallyVariableFeatures(brain_poste, assay = "SCT", features = VariableFeatures(brain_poste)[1:1000], 
+                                             selection.method = "markvariogram")
+# top  features identified by this measure.
+top.features <- head(SpatiallyVariableFeatures(brain_poste, selection.method = "markvariogram"), 9)
+SpatialFeaturePlot(brain_poste, features = top.features, ncol = 3, alpha = c(0.1, 1))
+```
+
+# Subset out anatomical regions
+Subset the object, visualize the cortical cells either on the full image, or a cropped image.
+```{r}
+cortex <- subset(brain_poste, idents = c(1, 2, 3, 5, 6, 7))
+cortex <- subset(cortex, posterior1_imagerow > 500 | posterior1_imagecol < 250, invert = TRUE)
+cortex <- subset(cortex, posterior1_imagerow > 300 & posterior1_imagecol > 350, invert = TRUE)
+cortex <- subset(cortex, posterior1_imagerow > 350 & posterior1_imagecol > 450, invert = TRUE)
+
+p1 <- SpatialDimPlot(cortex, crop = TRUE, label = TRUE)
+p2 <- SpatialDimPlot(cortex, crop = FALSE, label = TRUE, pt.size.factor = 1, label.size = 3)
+p1 + p2
+```
+
+
+# Integration with single-cell data
+Load the pre-process the scRNA-seq reference, then perform label transfer.
+```{r, warning=FALSE, comment=FALSE,message=FALSE}
+allen_reference <- readRDS("allen_cortex.rds")
+library(dplyr)
+memory.limit(80000)
+memory.limit()
+## setting ncells=3000 normalizes the full dataset but learns noise models on 3k cells
+# this speeds up SCTransform with no loss in performance
+allen_reference <- SCTransform(allen_reference, ncells = 3000, verbose = FALSE) %>% RunPCA(verbose = FALSE) %>% 
+  RunUMAP(dims = 1:30)
+```
+
+
+
+```{r,warning=FALSE, message=FALSE}
+#Renormalize subset data
+cortex <- SCTransform(cortex, assay = "Spatial", verbose = FALSE) %>% RunPCA(verbose = FALSE)
+# the annotation is stored in the 'subclass' column of object metadata
+DimPlot(allen_reference, group.by = "subclass", label = TRUE)
+
+anchors <- FindTransferAnchors(reference = allen_reference, query = cortex, normalization.method = "SCT")
+predictions.assay <- TransferData(anchorset = anchors, refdata = allen_reference$subclass, prediction.assay = TRUE, 
+                                  weight.reduction = cortex[["pca"]])
+cortex[["predictions"]] <- predictions.assay
+```
+
+Prediction scores for each spot for each class
+
+```{r}
+DefaultAssay(cortex) <- "predictions"
+SpatialFeaturePlot(cortex, features = c("L2/3 IT", "L4"), pt.size.factor = 1.6, ncol = 2, crop = TRUE)
+```
+
